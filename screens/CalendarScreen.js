@@ -10,24 +10,61 @@ import {
 } from 'react-native';
 import { Calendar } from 'react-native-calendars';
 import { Ionicons } from '@expo/vector-icons';
-import { collection, query, where, onSnapshot } from 'firebase/firestore';
-import { db } from 'services/firebase';
+
+import { supabase } from '../services/supabase'; // Adjust path as needed
 
 export default function CalendarScreen() {
   const [selectedDate, setSelectedDate] = useState(new Date().toISOString().split('T')[0]);
   const [bookings, setBookings] = useState({});
   const [dayBookings, setDayBookings] = useState([]);
   const [modalVisible, setModalVisible] = useState(false);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    // Listen to all bookings
-    const unsubscribe = onSnapshot(collection(db, 'bookings'), (querySnapshot) => {
-      const bookingsData = {};
+    fetchBookings();
+    
+    // Set up real-time subscription
+    const subscription = supabase
+      .channel('bookings-channel')
+      .on('postgres_changes', 
+        { 
+          event: '*', 
+          schema: 'public', 
+          table: 'bookings' 
+        }, 
+        (payload) => {
+          console.log('Booking change:', payload);
+          // Refetch bookings when there's a change
+          fetchBookings();
+        }
+      )
+      .subscribe();
+
+    return () => {
+      subscription.unsubscribe();
+    };
+  }, []);
+
+  const fetchBookings = async () => {
+    try {
+      setLoading(true);
       
-      querySnapshot.forEach((doc) => {
-        const booking = { id: doc.id, ...doc.data() };
-        const startDate = booking.rentalDate.split('T')[0];
-        const endDate = booking.returnDate.split('T')[0];
+      const { data: bookingsData, error } = await supabase
+        .from('bookings')
+        .select('*')
+        .order('rental_date', { ascending: true });
+
+      if (error) {
+        console.error('Error fetching bookings:', error);
+        return;
+      }
+
+      const processedBookings = {};
+      
+      bookingsData.forEach((booking) => {
+        // Adjust field names based on your Supabase table structure
+        const startDate = booking.rental_date.split('T')[0];
+        const endDate = booking.return_date.split('T')[0];
         
         // Mark all dates between rental and return
         const start = new Date(startDate);
@@ -36,23 +73,25 @@ export default function CalendarScreen() {
         for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
           const dateStr = d.toISOString().split('T')[0];
           
-          if (!bookingsData[dateStr]) {
-            bookingsData[dateStr] = {
+          if (!processedBookings[dateStr]) {
+            processedBookings[dateStr] = {
               marked: true,
               dotColor: '#FF6B35',
               bookings: []
             };
           }
           
-          bookingsData[dateStr].bookings.push(booking);
+          processedBookings[dateStr].bookings.push(booking);
         }
       });
       
-      setBookings(bookingsData);
-    });
-
-    return () => unsubscribe();
-  }, []);
+      setBookings(processedBookings);
+    } catch (error) {
+      console.error('Error processing bookings:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
 
   const onDayPress = (day) => {
     setSelectedDate(day.dateString);
@@ -64,7 +103,7 @@ export default function CalendarScreen() {
   const renderBookingItem = ({ item }) => (
     <View style={styles.bookingItem}>
       <View style={styles.bookingHeader}>
-        <Text style={styles.customerName}>{item.customerName}</Text>
+        <Text style={styles.customerName}>{item.customer_name}</Text>
         <View style={[styles.statusBadge, { 
           backgroundColor: item.status === 'confirmed' ? '#4CAF50' : '#FF9800' 
         }]}>
@@ -75,23 +114,38 @@ export default function CalendarScreen() {
       <View style={styles.bookingDetails}>
         <View style={styles.detailRow}>
           <Ionicons name="car" size={16} color="#666" />
-          <Text style={styles.detailText}>{item.vehicleMake} {item.vehicleModel}</Text>
+          <Text style={styles.detailText}>{item.vehicle_make} {item.vehicle_model}</Text>
         </View>
         
         <View style={styles.detailRow}>
           <Ionicons name="calendar" size={16} color="#666" />
           <Text style={styles.detailText}>
-            {new Date(item.rentalDate).toLocaleDateString()} - {new Date(item.returnDate).toLocaleDateString()}
+            {new Date(item.rental_date).toLocaleDateString()} - {new Date(item.return_date).toLocaleDateString()}
           </Text>
         </View>
         
         <View style={styles.detailRow}>
           <Ionicons name="call" size={16} color="#666" />
-          <Text style={styles.detailText}>{item.customerPhone}</Text>
+          <Text style={styles.detailText}>{item.customer_phone}</Text>
         </View>
+        
+        {item.total_amount && (
+          <View style={styles.detailRow}>
+            <Ionicons name="cash" size={16} color="#666" />
+            <Text style={styles.detailText}>₱{item.total_amount.toLocaleString()}</Text>
+          </View>
+        )}
       </View>
     </View>
   );
+
+  if (loading) {
+    return (
+      <View style={[styles.container, styles.centered]}>
+        <Text>Loading calendar...</Text>
+      </View>
+    );
+  }
 
   return (
     <View style={styles.container}>
@@ -177,7 +231,7 @@ export default function CalendarScreen() {
               <FlatList
                 data={dayBookings}
                 renderItem={renderBookingItem}
-                keyExtractor={(item) => item.id}
+                keyExtractor={(item) => item.id.toString()}
                 showsVerticalScrollIndicator={false}
                 style={styles.bookingsList}
               />
@@ -198,6 +252,10 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: '#fff',
+  },
+  centered: {
+    justifyContent: 'center',
+    alignItems: 'center',
   },
   header: {
     padding: 20,

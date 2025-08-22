@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   View,
   Text,
@@ -13,8 +13,8 @@ import {
   Image
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { signInWithEmailAndPassword } from 'firebase/auth';
-import { auth } from '../services/firebase'; // ✅ adjust path to match your firebase.js
+import { supabase, testSupabaseConnection } from '../services/supabase'; // ✅ adjust path to match your supabase.js
+import NetInfo from '@react-native-community/netinfo';
 
 const { width, height } = Dimensions.get('window');
 const isWeb = Platform.OS === 'web';
@@ -24,6 +24,8 @@ export default function LoginScreen({ navigation }) {
   const [loading, setLoading] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
 
+ 
+
   const handleLogin = async () => {
     if (!formData.email || !formData.password) {
       Alert.alert('Error', 'Please fill in all fields');
@@ -31,25 +33,59 @@ export default function LoginScreen({ navigation }) {
     }
 
     setLoading(true);
+    
     try {
-      await signInWithEmailAndPassword(auth, formData.email, formData.password);
-      // Navigation will be handled by auth state listener in your app
-    } catch (error) {
-      let errorMessage = 'Login failed. Please try again.';
-      switch (error.code) {
-        case 'auth/user-not-found':
-          errorMessage = 'No account found with this email address.';
-          break;
-        case 'auth/wrong-password':
-          errorMessage = 'Incorrect password. Please try again.';
-          break;
-        case 'auth/invalid-email':
-          errorMessage = 'Please enter a valid email address.';
-          break;
-        case 'auth/too-many-requests':
-          errorMessage = 'Too many failed attempts. Please try again later.';
-          break;
+      console.log('Attempting login with:', { email: formData.email });
+      
+      // Check network connectivity first
+      const netInfo = await NetInfo.fetch();
+      if (!netInfo.isConnected) {
+        Alert.alert('No Internet Connection', 'Please check your internet connection and try again.');
+        setLoading(false);
+        return;
       }
+
+      const { data, error } = await supabase.auth.signInWithPassword({
+        email: formData.email.trim(),
+        password: formData.password,
+      });
+
+      console.log('Login response:', { data, error });
+
+      if (error) {
+        console.error('Supabase auth error:', error);
+        
+        let errorMessage = 'Login failed. Please try again.';
+        
+        // Handle specific error types
+        if (error.message.includes('Invalid login credentials')) {
+          errorMessage = 'Invalid email or password. Please check your credentials and try again.';
+        } else if (error.message.includes('Email not confirmed')) {
+          errorMessage = 'Please confirm your email address before signing in.';
+        } else if (error.message.includes('Too many requests')) {
+          errorMessage = 'Too many failed attempts. Please try again later.';
+        } else if (error.message.includes('network') || error.message.includes('fetch')) {
+          errorMessage = 'Network error. Please check your internet connection and try again.';
+        } else if (error.message.includes('Invalid email')) {
+          errorMessage = 'Please enter a valid email address.';
+        }
+        
+        Alert.alert('Login Error', errorMessage);
+      } else if (data?.user) {
+        console.log('Login successful:', data.user);
+        // Navigation will be handled by auth state listener in your app
+      }
+    } catch (error) {
+      console.error('Unexpected error during login:', error);
+      
+      let errorMessage = 'An unexpected error occurred. Please try again.';
+      
+      if (error.message?.includes('Network request failed')) {
+        errorMessage = 'Network connection failed. Please check your internet connection and try again.';
+      } else if (error.message?.includes('timeout')) {
+        errorMessage = 'Request timed out. Please try again.';
+      }
+      
       Alert.alert('Login Error', errorMessage);
     } finally {
       setLoading(false);
@@ -137,6 +173,8 @@ export default function LoginScreen({ navigation }) {
                   <Text style={styles.forgotPasswordText}>Forgot Password?</Text>
                 </TouchableOpacity>
               </View>
+
+             
             </View>
 
             {/* Additional UI Elements */}

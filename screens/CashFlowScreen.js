@@ -11,8 +11,6 @@ import {
   FlatList
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { collection, addDoc, onSnapshot, query, orderBy, where } from 'firebase/firestore';
-import { db } from 'services/firebase';
 
 export default function CashFlowScreen() {
   const [transactions, setTransactions] = useState([]);

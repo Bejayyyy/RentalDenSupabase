@@ -6,8 +6,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { StatusBar } from 'expo-status-bar';
 import { View, Text } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
-import { onAuthStateChanged } from 'firebase/auth';
-import { auth } from './services/firebase';
+import { supabase } from './services/supabase';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 // Import screens
@@ -19,7 +18,7 @@ import CalendarScreen from './screens/CalendarScreen';
 import CashFlowScreen from './screens/CashFlowScreen';
 import DashboardScreen from './screens/DashboardScreen';
 import LoginScreen from './screens/LoginScreen';
-import SignUpScreen from './screens/SignUpScreen';
+import { AuthProvider } from 'services/AuthContext';
 
 
 const Tab = createBottomTabNavigator();
@@ -88,11 +87,7 @@ function AuthNavigator() {
             component={LoginScreen}
             options={{ headerShown: false }}
           />
-          <Stack.Screen
-            name="SignUp"
-            component={SignUpScreen}
-            options={{ title: 'Create Account' }}
-          />
+          
         </Stack.Navigator>
       </NavigationContainer>
     </SafeAreaProvider>
@@ -158,11 +153,26 @@ export default function App() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, (user) => {
-      setUser(user);
+    // Get initial session
+    const getInitialSession = async () => {
+      const { data: { session } } = await supabase.auth.getSession();
+      setUser(session?.user ?? null);
       setLoading(false);
-    });
-    return unsubscribe;
+    };
+
+    getInitialSession();
+
+    // Listen for auth changes
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(
+      async (event, session) => {
+        setUser(session?.user ?? null);
+        setLoading(false);
+      }
+    );
+
+    return () => {
+      subscription?.unsubscribe();
+    };
   }, []);
 
   if (loading) {
@@ -175,7 +185,9 @@ export default function App() {
 
   return (
     <SafeAreaProvider>
-      {user ? <MainNavigator /> : <AuthNavigator />}
+      <AuthProvider user = {user}>
+        {user ? <MainNavigator /> : <AuthNavigator />}
+      </AuthProvider>
     </SafeAreaProvider>
   );
 

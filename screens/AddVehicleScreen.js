@@ -16,10 +16,10 @@ import {
 } from "react-native"
 import { Ionicons } from "@expo/vector-icons"
 import * as ImagePicker from "expo-image-picker"
-import { collection, addDoc, doc, updateDoc } from "firebase/firestore"
-import { ref, uploadBytes, getDownloadURL } from "firebase/storage"
-import { db, storage } from "../services/firebase"
+import { supabase } from "../services/supabase"
 import { SafeAreaView } from "react-native-safe-area-context"
+import { decode } from 'base64-arraybuffer'
+import * as FileSystem from 'expo-file-system'
 
 const { width } = Dimensions.get("window")
 const isWeb = Platform.OS === "web"
@@ -31,21 +31,27 @@ export default function AddVehicleScreen({ navigation, route }) {
   const [formData, setFormData] = useState({
     make: editingVehicle?.make || "",
     model: editingVehicle?.model || "",
-    year: editingVehicle?.year || "",
+    year: editingVehicle?.year?.toString() || "",
     type: editingVehicle?.type || "",
     seats: editingVehicle?.seats?.toString() || "",
-    pricePerDay: editingVehicle?.pricePerDay?.toString() || "",
+    pricePerDay: editingVehicle?.price_per_day?.toString() || "",
     mileage: editingVehicle?.mileage?.toString() || "",
     description: editingVehicle?.description || "",
     available: editingVehicle?.available ?? true,
-    imageUrl: editingVehicle?.imageUrl || null,
+    totalQuantity: editingVehicle?.total_quantity?.toString() || "1",
+    availableQuantity: editingVehicle?.available_quantity?.toString() || "1",
+    imageUrl: editingVehicle?.image_url || null,
   })
 
   const [loading, setLoading] = useState(false)
-  const [imageUri, setImageUri] = useState(editingVehicle?.imageUrl || null)
+  const [imageUri, setImageUri] = useState(editingVehicle?.image_url || null)
 
   const vehicleTypes = ["Sedan", "SUV", "Hatchback", "Convertible", "Truck", "Van", "Luxury"]
 
+  const base64ToBlob = (base64, contentType = 'application/octet-stream') => {
+    const byteArray = decode(base64);
+    return new Blob([byteArray], { type: contentType });
+  };
   const pickImage = async () => {
     const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync()
 
@@ -65,36 +71,76 @@ export default function AddVehicleScreen({ navigation, route }) {
       setImageUri(result.assets[0].uri)
     }
   }
-
   const uploadImage = async (uri) => {
-    if (!uri) return null
-
+    if (!uri) return null;
+  
+    const fileExt = uri.split(".").pop()?.toLowerCase() || "jpg";
+    const safeExt = fileExt === "heic" ? "jpg" : fileExt; // convert HEIC → JPG
+    const fileName = `${Date.now()}_${Math.random().toString(36).substring(7)}.${safeExt}`;
+    const filePath = `vehicles/${fileName}`;
+    let contentType = `image/${safeExt === "jpg" ? "jpeg" : safeExt}`;
+  
     try {
-      const response = await fetch(uri)
-      const blob = await response.blob()
-
-      const filename = `vehicles/${Date.now()}_${Math.random().toString(36).substring(7)}`
-      const imageRef = ref(storage, filename)
-
-      await uploadBytes(imageRef, blob)
-      const downloadURL = await getDownloadURL(imageRef)
-
-      return downloadURL
-    } catch (error) {
-      console.error("Error uploading image:", error)
-      throw error
+      if (isWeb) {
+        // Web: Blob → File
+        const response = await fetch(uri);
+        if (!response.ok) throw new Error(`Failed to fetch image: ${response.statusText}`);
+        const blob = await response.blob();
+        if (blob.type) contentType = blob.type;
+  
+        const file = new File([blob], fileName, { type: contentType });
+  
+        const { error } = await supabase.storage
+          .from("vehicle-images")
+          .upload(filePath, file, { contentType, upsert: false });
+  
+        if (error) throw error;
+      } else {
+        // Mobile (iOS/Android): Base64 → ArrayBuffer
+        const base64String = await FileSystem.readAsStringAsync(uri, {
+          encoding: FileSystem.EncodingType.Base64,
+        });
+  
+        const arrayBuffer = decode(base64String);
+  
+        const { error } = await supabase.storage
+          .from("vehicle-images")
+          .upload(filePath, arrayBuffer, { contentType, upsert: false });
+  
+        if (error) throw error;
+      }
+  
+      // Get public URL
+      const { data: publicData } = supabase.storage
+        .from("vehicle-images")
+        .getPublicUrl(filePath);
+  
+      return publicData.publicUrl;
+    } catch (err) {
+      console.error("Upload error:", err);
+      throw err;
     }
-  }
+  };
 
   const handleSubmit = async () => {
     // Validation
-    if (!formData.make || !formData.model || !formData.year || !formData.pricePerDay || !formData.seats) {
+    if (!formData.make || !formData.model || !formData.year || !formData.pricePerDay || !formData.seats || !formData.totalQuantity) {
       Alert.alert("Error", "Please fill in all required fields")
       return
     }
 
     if (Number.parseInt(formData.seats) < 1 || Number.parseInt(formData.seats) > 50) {
       Alert.alert("Error", "Please enter a valid number of seats (1-50)")
+      return
+    }
+
+    if (Number.parseInt(formData.totalQuantity) < 1) {
+      Alert.alert("Error", "Total quantity must be at least 1")
+      return
+    }
+
+    if (Number.parseInt(formData.availableQuantity) > Number.parseInt(formData.totalQuantity)) {
+      Alert.alert("Error", "Available quantity cannot exceed total quantity")
       return
     }
 
@@ -105,7 +151,39 @@ export default function AddVehicleScreen({ navigation, route }) {
 
       // Upload new image if selected
       if (imageUri && imageUri !== formData.imageUrl) {
-        imageUrl = await uploadImage(imageUri)
+        console.log('Uploading new image...');
+        try {
+          imageUrl = await uploadImage(imageUri)
+        } catch (uploadError) {
+          console.error('Image upload failed:', uploadError)
+          
+          // Ask user if they want to continue without image
+          const continueWithoutImage = await new Promise((resolve) => {
+            Alert.alert(
+              "Image Upload Failed",
+              `${uploadError.message}\n\nWould you like to save the vehicle without an image?`,
+              [
+                {
+                  text: "Cancel",
+                  style: "cancel",
+                  onPress: () => resolve(false)
+                },
+                {
+                  text: "Continue Without Image",
+                  onPress: () => resolve(true)
+                }
+              ]
+            )
+          })
+          
+          if (!continueWithoutImage) {
+            setLoading(false)
+            return
+          }
+          
+          // Keep existing image URL or set to null
+          imageUrl = formData.imageUrl
+        }
       }
 
       const vehicleData = {
@@ -114,27 +192,49 @@ export default function AddVehicleScreen({ navigation, route }) {
         year: Number.parseInt(formData.year),
         type: formData.type,
         seats: Number.parseInt(formData.seats),
-        pricePerDay: Number.parseFloat(formData.pricePerDay),
+        price_per_day: Number.parseFloat(formData.pricePerDay),
         mileage: formData.mileage ? Number.parseInt(formData.mileage) : null,
         description: formData.description,
         available: formData.available,
-        imageUrl: imageUrl,
-        updatedAt: new Date().toISOString(),
+        total_quantity: Number.parseInt(formData.totalQuantity),
+        available_quantity: Number.parseInt(formData.availableQuantity),
+        image_url: imageUrl,
+        updated_at: new Date().toISOString(),
       }
 
+      console.log('Saving vehicle data:', vehicleData);
+
       if (isEditing) {
-        await updateDoc(doc(db, "vehicles", editingVehicle.id), vehicleData)
+        const { error } = await supabase
+          .from('vehicles')
+          .update(vehicleData)
+          .eq('id', editingVehicle.id)
+
+        if (error) {
+          console.error('Update error:', error);
+          throw error
+        }
+
         Alert.alert("Success", "Vehicle updated successfully")
       } else {
-        vehicleData.createdAt = new Date().toISOString()
-        await addDoc(collection(db, "vehicles"), vehicleData)
+        vehicleData.created_at = new Date().toISOString()
+        
+        const { error } = await supabase
+          .from('vehicles')
+          .insert([vehicleData])
+
+        if (error) {
+          console.error('Insert error:', error);
+          throw error
+        }
+
         Alert.alert("Success", "Vehicle added successfully")
       }
 
       navigation.goBack()
     } catch (error) {
       console.error("Error saving vehicle:", error)
-      Alert.alert("Error", "Failed to save vehicle. Please try again.")
+      Alert.alert("Error", `Failed to save vehicle: ${error.message}`)
     } finally {
       setLoading(false)
     }
@@ -305,6 +405,45 @@ export default function AddVehicleScreen({ navigation, route }) {
             </View>
           </View>
 
+          {/* Inventory Management */}
+          <View style={styles.card}>
+            <Text style={styles.sectionTitle}>Inventory Management</Text>
+            
+            <View style={[styles.inputRow, isWeb && styles.inputRowWeb]}>
+              <View style={[styles.inputGroup, styles.inputHalf]}>
+                <Text style={styles.label}>Total Quantity *</Text>
+                <TextInput
+                  style={styles.input}
+                  value={formData.totalQuantity}
+                  onChangeText={(text) => {
+                    setFormData({ ...formData, totalQuantity: text });
+                    // Auto-adjust available quantity if it exceeds total
+                    if (Number.parseInt(text) < Number.parseInt(formData.availableQuantity)) {
+                      setFormData(prev => ({ ...prev, totalQuantity: text, availableQuantity: text }));
+                    }
+                  }}
+                  placeholder="e.g., 3"
+                  placeholderTextColor="#9ca3af"
+                  keyboardType="numeric"
+                />
+                <Text style={styles.helpText}>How many units of this vehicle do you have?</Text>
+              </View>
+
+              <View style={[styles.inputGroup, styles.inputHalf]}>
+                <Text style={styles.label}>Available Quantity *</Text>
+                <TextInput
+                  style={styles.input}
+                  value={formData.availableQuantity}
+                  onChangeText={(text) => setFormData({ ...formData, availableQuantity: text })}
+                  placeholder="e.g., 2"
+                  placeholderTextColor="#9ca3af"
+                  keyboardType="numeric"
+                />
+                <Text style={styles.helpText}>How many are currently available for rent?</Text>
+              </View>
+            </View>
+          </View>
+
           <TouchableOpacity
             style={[styles.submitButton, loading && styles.disabledButton]}
             onPress={handleSubmit}
@@ -445,6 +584,12 @@ const styles = StyleSheet.create({
     backgroundColor: '#fff',
     color: '#222',
     fontWeight: '500',
+  },
+  helpText: {
+    fontSize: 11,
+    color: '#6b7280',
+    marginTop: 4,
+    fontStyle: 'italic',
   },
   textArea: {
     height: 100,

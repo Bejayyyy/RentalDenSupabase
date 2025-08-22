@@ -14,9 +14,8 @@ import {
   Dimensions,
 } from "react-native"
 import { Ionicons } from "@expo/vector-icons"
-import { collection, onSnapshot, doc, deleteDoc } from "firebase/firestore"
-import { db } from "../services/firebase"
 import { SafeAreaView } from "react-native-safe-area-context"
+import { supabase } from '../services/supabase' // Adjust path as needed
 
 const { width } = Dimensions.get("window")
 const isWeb = Platform.OS === "web"
@@ -28,34 +27,90 @@ export default function VehiclesScreen({ navigation }) {
   const [bookings, setBookings] = useState([])
 
   useEffect(() => {
-    const unsubscribeVehicles = onSnapshot(collection(db, "vehicles"), (querySnapshot) => {
-      const vehiclesList = []
-      querySnapshot.forEach((doc) => {
-        vehiclesList.push({
-          id: doc.id,
-          ...doc.data(),
-        })
-      })
-      setVehicles(vehiclesList)
-      setLoading(false)
-    })
+    fetchVehicles()
+    fetchBookings()
 
-    const unsubscribeBookings = onSnapshot(collection(db, "bookings"), (querySnapshot) => {
-      const bookingsList = []
-      querySnapshot.forEach((doc) => {
-        bookingsList.push({
-          id: doc.id,
-          ...doc.data(),
-        })
-      })
-      setBookings(bookingsList)
-    })
+    // Set up real-time subscriptions
+    const vehiclesSubscription = supabase
+      .channel('vehicles-channel')
+      .on('postgres_changes', 
+        { 
+          event: '*', 
+          schema: 'public', 
+          table: 'vehicles' 
+        }, 
+        (payload) => {
+          console.log('Vehicle change:', payload)
+          fetchVehicles()
+        }
+      )
+      .subscribe()
+
+    const bookingsSubscription = supabase
+      .channel('bookings-channel')
+      .on('postgres_changes', 
+        { 
+          event: '*', 
+          schema: 'public', 
+          table: 'bookings' 
+        }, 
+        (payload) => {
+          console.log('Booking change:', payload)
+          fetchBookings()
+        }
+      )
+      .subscribe()
 
     return () => {
-      unsubscribeVehicles()
-      unsubscribeBookings()
+      vehiclesSubscription.unsubscribe()
+      bookingsSubscription.unsubscribe()
     }
   }, [])
+
+  const fetchVehicles = async () => {
+    try {
+      const { data: vehiclesData, error } = await supabase
+        .from('vehicles')
+        .select('*')
+        .order('created_at', { ascending: false })
+
+      if (error) {
+        console.error('Error fetching vehicles:', error)
+        Alert.alert('Error', 'Failed to fetch vehicles')
+        return
+      }
+
+      setVehicles(vehiclesData || [])
+    } catch (error) {
+      console.error('Error in fetchVehicles:', error)
+      Alert.alert('Error', 'Something went wrong while fetching vehicles')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const fetchBookings = async () => {
+    try {
+      const { data: bookingsData, error } = await supabase
+        .from('bookings')
+        .select('*')
+        .order('created_at', { ascending: false })
+
+      if (error) {
+        console.error('Error fetching bookings:', error)
+        return
+      }
+
+      setBookings(bookingsData || [])
+    } catch (error) {
+      console.error('Error in fetchBookings:', error)
+    }
+  }
+
+  const refreshData = async () => {
+    setLoading(true)
+    await Promise.all([fetchVehicles(), fetchBookings()])
+  }
 
   const getFilteredVehicles = () => {
     switch (activeFilter) {
@@ -75,7 +130,7 @@ export default function VehiclesScreen({ navigation }) {
     const activeRentals = bookings.filter(b => b.status === "confirmed").length
     const maintenanceVehicles = vehicles.filter(v => v.status === "maintenance").length
     const totalRevenue = bookings.filter(b => b.status === "completed")
-      .reduce((sum, b) => sum + (b.totalAmount || 0), 0)
+      .reduce((sum, b) => sum + (parseFloat(b.total_price) || 0), 0)
 
     return {
       totalBookings,
@@ -93,9 +148,21 @@ export default function VehiclesScreen({ navigation }) {
         style: "destructive",
         onPress: async () => {
           try {
-            await deleteDoc(doc(db, "vehicles", vehicleId))
+            const { error } = await supabase
+              .from('vehicles')
+              .delete()
+              .eq('id', vehicleId)
+
+            if (error) {
+              console.error('Error deleting vehicle:', error)
+              Alert.alert("Error", "Failed to delete vehicle")
+              return
+            }
+
             Alert.alert("Success", "Vehicle deleted successfully")
+            // Data will be updated automatically via real-time subscription
           } catch (error) {
+            console.error('Error in deleteVehicle:', error)
             Alert.alert("Error", "Failed to delete vehicle")
           }
         },
@@ -107,7 +174,7 @@ export default function VehiclesScreen({ navigation }) {
     <View style={styles.vehicleCard}>
       <View style={styles.imageContainer}>
         <Image
-          source={{ uri: item.imageUrl || "https://via.placeholder.com/400x240?text=No+Image" }}
+          source={{ uri: item.image_url || item.imageUrl || "https://via.placeholder.com/400x240?text=No+Image" }}
           style={styles.vehicleImage}
           resizeMode="cover"
         />
@@ -141,7 +208,7 @@ export default function VehiclesScreen({ navigation }) {
             <Text style={styles.vehicleYear}>{item.year} • {item.type}</Text>
           </View>
           <View style={styles.priceContainer}>
-            <Text style={styles.priceAmount}>${item.pricePerDay}</Text>
+            <Text style={styles.priceAmount}>₱{parseFloat(item.price_per_day || item.pricePerDay || 0).toLocaleString()}</Text>
             <Text style={styles.priceLabel}>/day</Text>
           </View>
         </View>
@@ -169,6 +236,15 @@ export default function VehiclesScreen({ navigation }) {
             </View>
             <Text style={styles.featureText}>{item.type}</Text>
           </View>
+
+          {item.license_plate && (
+            <View style={styles.featureItem}>
+              <View style={styles.featureIcon}>
+                <Ionicons name="document-text" size={14} color="#6b7280" />
+              </View>
+              <Text style={styles.featureText}>{item.license_plate}</Text>
+            </View>
+          )}
         </View>
 
         {item.description && (
@@ -239,7 +315,7 @@ export default function VehiclesScreen({ navigation }) {
               <Text style={styles.statLabel}>Total Fleet</Text>
               <View style={styles.statTrend}>
                 <Ionicons name="trending-up" size={12} color="#10b981" />
-                <Text style={styles.statTrendText}>+2 this month</Text>
+                <Text style={styles.statTrendText}>Fleet size</Text>
               </View>
             </View>
             
@@ -251,7 +327,7 @@ export default function VehiclesScreen({ navigation }) {
               <Text style={styles.statLabel}>Total Bookings</Text>
               <View style={styles.statTrend}>
                 <Ionicons name="trending-up" size={12} color="#10b981" />
-                <Text style={styles.statTrendText}>+{stats.totalBookings} total</Text>
+                <Text style={styles.statTrendText}>All time</Text>
               </View>
             </View>
           </View>
@@ -265,7 +341,7 @@ export default function VehiclesScreen({ navigation }) {
               <Text style={styles.statLabel}>Active Rentals</Text>
               <View style={styles.statTrend}>
                 <Ionicons name="pulse" size={12} color="#3b82f6" />
-                <Text style={[styles.statTrendText, { color: "#3b82f6" }]}>Live tracking</Text>
+                <Text style={[styles.statTrendText, { color: "#3b82f6" }]}>Currently active</Text>
               </View>
             </View>
 
@@ -273,11 +349,11 @@ export default function VehiclesScreen({ navigation }) {
               <View style={styles.statIconContainer}>
                 <Ionicons name="cash" size={24} color="#222" />
               </View>
-              <Text style={styles.statValue}>${stats.totalRevenue.toLocaleString()}</Text>
+              <Text style={styles.statValue}>₱{stats.totalRevenue.toLocaleString()}</Text>
               <Text style={styles.statLabel}>Total Revenue</Text>
               <View style={styles.statTrend}>
                 <Ionicons name="trending-up" size={12} color="#10b981" />
-                <Text style={styles.statTrendText}>This year</Text>
+                <Text style={styles.statTrendText}>All completed</Text>
               </View>
             </View>
           </View>
@@ -362,12 +438,12 @@ export default function VehiclesScreen({ navigation }) {
       <FlatList
         data={getFilteredVehicles()}
         renderItem={renderVehicleItem}
-        keyExtractor={(item) => item.id}
+        keyExtractor={(item) => item.id.toString()}
         ListHeaderComponent={renderHeader}
         refreshControl={
           <RefreshControl 
             refreshing={loading} 
-            onRefresh={() => setLoading(true)}
+            onRefresh={refreshData}
             colors={["#222"]}
             tintColor="#222"
           />
@@ -375,7 +451,7 @@ export default function VehiclesScreen({ navigation }) {
         showsVerticalScrollIndicator={false}
         contentContainerStyle={styles.listContainer}
         numColumns={1}
-        ListEmptyComponent={renderEmptyState}
+        ListEmptyComponent={!loading ? renderEmptyState : null}
         ItemSeparatorComponent={() => <View style={{ height: 16 }} />}
       />
     </SafeAreaView>
